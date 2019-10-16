@@ -161,8 +161,6 @@ class MainApplication(tk.Frame):
         settings += '\n### Regions\n'
         settings += 'regions = %s\n'%job['regions']
         settings += '\n### Optimisation tools\n'
-        settings += 'individual = %s\n'%job['individual'] # added new
-        settings += 'diagnostics = %s\n'%(job['diagnostics'] == 'No') # aded new
         settings += 'lower = %s\n'%job['lower'] #added new
         settings += 'upper = %s\n'%job['upper'] #added new
         settings += 'use_average = %s\n'%(job['use_average']=='Average') #added
@@ -303,8 +301,6 @@ class MainApplication(tk.Frame):
             job['outputname'] = save_as
             job['outputframes'] = output_overlayed_images
             job['font_size'] = font_size
-            job['diagnostics'] = 'Yes' if diagnostics else 'No' # added new
-            job['individual'] = individual # added new
             job['extra_filter'] = extra_filter # added new
             job['cutoff_filter'] = cutoff_filter #new
             job['lower'] = lower # added new
@@ -390,9 +386,6 @@ class Utils(tk.Toplevel):
         ttk.Button(self,text="Export to tsv", width=30,
                     command=self.tsv).grid(row=1, padx=20, pady=10)
 
-        ttk.Button(self,text="Fingerprint", width=30,
-                    command=self.fingerprint).grid(row=2, padx=20, pady=10)
-
     def plotpath(self):
         filename = tkFileDialog.askopenfilename(title='Locate a track.p file',filetypes=[("track.p file","*.p")])
         if filename:
@@ -400,9 +393,6 @@ class Utils(tk.Toplevel):
 
     def tsv(self):
         ToTsv(self)
-
-    def fingerprint(self):
-        Fingerprint(self)
 
 class ToTsv(tk.Toplevel):
     def __init__(self, parent, *args, **kwargs):
@@ -540,6 +530,9 @@ class ToTsv(tk.Toplevel):
                         out += '\t' + 'n/a'
                 out += '\n'
 
+
+
+
             save_fname = tkFileDialog.asksaveasfilename(filetypes=
                         [('*.tsv','Tab seperated file')])
             if save_fname:
@@ -547,6 +540,7 @@ class ToTsv(tk.Toplevel):
                     save_fname += '.tsv'
                 with open(save_fname,'w') as f:
                     f.write(out)
+                    
                 self.main.log(save_fname+' written.')
 
 
@@ -685,7 +679,7 @@ class AddJob(tk.Toplevel):
         px_to_mm_label = ttk.LabelFrame(videocutframe, text="px to mm factor")
         px_to_mm_label.grid(row=2, column=3, sticky='w', padx=10)
         self.px_to_mm = ttk.Entry(px_to_mm_label, width=15)
-        self.px_to_mm.insert(0, '1.0')
+        self.px_to_mm.insert(0, '0.040')
         self.px_to_mm.pack(side='left', padx=3)
 
         darkfield_label = ttk.LabelFrame(videocutframe, text="Darkfield")
@@ -706,8 +700,7 @@ class AddJob(tk.Toplevel):
 
         method_label = ttk.LabelFrame(methodframe, text="Method")
         method_label.grid(row=0, column=0, sticky='w', padx=10)
-        self.method = ttk.Combobox(method_label, values=('Z-filtering',
-                    'Keep Dead'), state='readonly')
+        self.method = ttk.Combobox(method_label, values=('Keep Dead','Z-filtering'), state='readonly')
         self.method.pack(side='left', padx=3)
         self.method.current(0)
 
@@ -715,12 +708,14 @@ class AddJob(tk.Toplevel):
         z_use_label.grid(row=0, column=1, sticky='w', padx=10)
         self.z_use = ttk.Entry(z_use_label, width=15)
         self.z_use.insert(0, '100')
+        self.z_use.configure(state="disabled")
         self.z_use.pack(side='left', padx=3)
 
         z_padding_label = ttk.LabelFrame(methodframe, text="Z padding")
         z_padding_label.grid(row=0, column=2, sticky='w', padx=10)
         self.z_padding = ttk.Entry(z_padding_label, width=15)
         self.z_padding.insert(0, '5')
+        self.z_padding.configure(state="disabled")
         self.z_padding.pack(side='left', padx=3)
 
         std_px_label = ttk.LabelFrame(methodframe, text="Std pixels")
@@ -732,19 +727,19 @@ class AddJob(tk.Toplevel):
         threshold_label = ttk.LabelFrame(methodframe, text="Threshold (0-255)")
         threshold_label.grid(row=1, column=1, sticky='w', padx=10, pady=10)
         self.threshold = ttk.Entry(threshold_label, width=15)
-        self.threshold.insert(0, '8')
+        self.threshold.insert(0, '9')
         self.threshold.pack(side='left', padx=3)
 
         opening_label = ttk.LabelFrame(methodframe, text="Opening")
         opening_label.grid(row=1, column=2, sticky='w', padx=10, pady=10)
         self.opening = ttk.Entry(opening_label, width=15)
-        self.opening.insert(0, '2')
+        self.opening.insert(0, '1')
         self.opening.pack(side='left', padx=3)
 
         closing_label = ttk.LabelFrame(methodframe, text="Closing")
         closing_label.grid(row=1, column=3, sticky='w', padx=10, pady=10)
         self.closing = ttk.Entry(closing_label, width=15)
-        self.closing.insert(0, '4')
+        self.closing.insert(0, '3')
         self.closing.pack(side='left', padx=3)
 
         skeletonize_label = ttk.LabelFrame(methodframe, text="Skeletonize")
@@ -780,21 +775,21 @@ class AddJob(tk.Toplevel):
                      text="Minimum size (px)")
         minsize_label.grid(row=0, column=0, sticky='w', padx=10)
         self.minsize = ttk.Entry(minsize_label, width=15)
-        self.minsize.insert(0, '200')
+        self.minsize.insert(0, '25')
         self.minsize.pack(side='left', padx=3)
 
         maxsize_label = ttk.LabelFrame(filter_frame,
                      text="Maximum size (px)")
         maxsize_label.grid(row=0, column=1, sticky='w', padx=10)
         self.maxsize = ttk.Entry(maxsize_label, width=15)
-        self.maxsize.insert(0, '1000')
+        self.maxsize.insert(0, '120')
         self.maxsize.pack(side='left', padx=3)
 
         minimum_ecc_label = ttk.LabelFrame(filter_frame,
                                 text="Worm-like (0-1)")
         minimum_ecc_label.grid(row=0, column=2, sticky='w', padx=10)
         self.minimum_ecc = ttk.Entry(minimum_ecc_label, width=15)
-        self.minimum_ecc.insert(0, '0.7')
+        self.minimum_ecc.insert(0, '0.93')
         self.minimum_ecc.pack(side='left', padx=3)
 
         ###########################
@@ -830,7 +825,7 @@ class AddJob(tk.Toplevel):
                      text="End frame")
         upper_label.grid(row=0, column=3, sticky='w', padx=5)
         self.upper = ttk.Entry(upper_label, width=7)
-        self.upper.insert(0, '9')
+        self.upper.insert(0, '100')
         self.upper.pack(side='left', padx=3)
 
         extra_filter_label = ttk.LabelFrame(cut_off_frame, text="Extra filter")
@@ -844,14 +839,14 @@ class AddJob(tk.Toplevel):
                      text="Max Bends")
         Bends_max_label.grid(row=0, column=5, sticky='w', padx=5)
         self.Bends_max = ttk.Entry(Bends_max_label, width=7)
-        self.Bends_max.insert(0, '60')
+        self.Bends_max.insert(0, '20')
         self.Bends_max.pack(side='left', padx=3)
 
         Speed_max_label = ttk.LabelFrame(cut_off_frame,
                      text="Max Speed")
         Speed_max_label.grid(row=0, column=6, sticky='w', padx=5)
         self.Speed_max = ttk.Entry(Speed_max_label, width=7)
-        self.Speed_max.insert(0, '0.0025')
+        self.Speed_max.insert(0, '0.035')
         self.Speed_max.pack(side='left', padx=3)
 
         ###########################
@@ -865,14 +860,14 @@ class AddJob(tk.Toplevel):
                      text="Maximum move distance (px)")
         maxdist_label.grid(row=0, column=0, sticky='w', padx=10)
         self.maxdist = ttk.Entry(maxdist_label, width=15)
-        self.maxdist.insert(0, '5')
+        self.maxdist.insert(0, '10')
         self.maxdist.pack(side='left', padx=3)
 
         minlength_label = ttk.LabelFrame(trajs_frame,
                      text="Minimum length (frames)")
         minlength_label.grid(row=0, column=1, sticky='w', padx=10)
         self.minlength = ttk.Entry(minlength_label, width=15)
-        self.minlength.insert(0, '5')
+        self.minlength.insert(0, '50')
         self.minlength.pack(side='left', padx=3)
 
         memory_label = ttk.LabelFrame(trajs_frame,
@@ -893,7 +888,7 @@ class AddJob(tk.Toplevel):
                      text="Bend threshold")
         bendthres_label.grid(row=0, column=0, sticky='w', padx=10)
         self.bendthres = ttk.Entry(bendthres_label, width=15)
-        self.bendthres.insert(0, '2.0')
+        self.bendthres.insert(0, '2.1')
         self.bendthres.pack(side='left', padx=3)
 
         minbends_label = ttk.LabelFrame(benvel_frame,
@@ -907,12 +902,12 @@ class AddJob(tk.Toplevel):
                      text="Frames to estimate velocity")
         velframes_label.grid(row=0, column=2, sticky='w', padx=10)
         self.velframes = ttk.Entry(velframes_label, width=15)
-        self.velframes.insert(0, '3')
+        self.velframes.insert(0, '49')
         self.velframes.pack(side='left', padx=3)
 
         ######### TRAJECTORIES  SECTION #########
 
-        dead_frame = ttk.LabelFrame(self, text="Dead worm statistics")
+        dead_frame = ttk.LabelFrame(self, text="Paralyzed worm statistics")
         dead_frame.grid(row=6, sticky='w', pady=10)
 
         maxbpm_label = ttk.LabelFrame(dead_frame,
@@ -983,22 +978,8 @@ class AddJob(tk.Toplevel):
         self.outputframes.insert(0, '0')
         self.outputframes.pack(side='left', padx=3)
 
-        diagnostics_label = ttk.LabelFrame(outputinfo_frame, text="Include diagnostics?")
-        diagnostics_label.grid(row=2, column=1, sticky='w', padx=10)
-        self.diagnostics = ttk.Combobox(diagnostics_label, values=('No',
-                    'Yes'), state='readonly')
-        self.diagnostics.pack(side='left', padx=3)
-        self.diagnostics.current(0)
-
-        individual_label = ttk.LabelFrame(outputinfo_frame, text="Individual diagnostics")
-        individual_label.grid(row=2, column=2, sticky='w', padx=10)
-        self.individual = tk.IntVar()
-        self.individual_box = tk.Checkbutton(individual_label,
-                                    variable=self.individual)
-        self.individual_box.pack()
-
         font_size = ttk.LabelFrame(outputinfo_frame, text="Font size")
-        font_size.grid(row=2, column=3, sticky='w', padx=10)
+        font_size.grid(row=2, column=1, sticky='w', padx=10)
         self.font_size = ttk.Entry(font_size, width=15)
         self.font_size.insert(0, '8')
         self.font_size.pack(side='left', padx=3)
@@ -1086,8 +1067,6 @@ class AddJob(tk.Toplevel):
             self.darkfield.set(edit_job['darkfield'])
             self.skeletonize.set(edit_job['skeletonize'])
             self.do_full_prune.set(edit_job['do_full_prune'])
-            self.individual.set(edit_job['individual']) # new
-            self.diagnostics.current(1 if edit_job['diagnostics'] == 'Yes' else 0)#new
             self.extra_filter.set(edit_job['extra_filter']) # new
             self.cutoff_filter.set(edit_job['cutoff_filter']) #new
             self.use_average.current(1 if edit_job['use_average'] == 'Maximum' else 0) # new
@@ -1095,7 +1074,6 @@ class AddJob(tk.Toplevel):
             self.outputname.configure(state='normal')
             self.outputname.insert(0,edit_job['outputname'])
             self.outputname.configure(state='readonly')
-            self.diagnostics.set
 
             # Region of interests:
             self.rois.configure(state='normal')
@@ -1135,11 +1113,9 @@ class AddJob(tk.Toplevel):
         if not add(job, 'fps', self.fps, float): return
         if not add(job, 'px_to_mm', self.px_to_mm, float): return
         if not add(job, 'darkfield', self.darkfield, bool): return
-        if not add(job, 'individual', self.individual, bool): return #new
         if not add(job, 'extra_filter', self.extra_filter, bool): return #new
         if not add(job, 'cutoff_filter', self.cutoff_filter, bool): return #new
         if not add(job, 'method', self.method, str): return
-        if not add(job, 'diagnostics', self.diagnostics, str): return #new
         if not add(job, 'use_average', self.use_average, str): return #new
         if not add(job, 'z_use', self.z_use, int): return
         if not add(job, 'z_padding', self.z_padding, int): return
