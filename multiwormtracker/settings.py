@@ -1,5 +1,5 @@
 # Input
-filename = "C:/Users/Mandy/Downloads/JBKirkegaard-multiwormtracker-85a540a2a163/D1_swimming_2016-04-01-122434-0000.avi"
+video_filename = "C:/Users/Mandy/Downloads/JBKirkegaard-multiwormtracker-85a540a2a163/D1_swimming_2016-04-01-122434-0000.avi"
 start_frame = 0
 limit_images_to = 10
 fps = 20.0

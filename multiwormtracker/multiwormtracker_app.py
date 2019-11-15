@@ -12,6 +12,8 @@ import cv2
 import os
 import multiprocessing
 import matplotlib
+import traceback
+import imp
 
 import multiwormtracker.radar_chart as radar_chart
 from multiwormtracker.plot_path import plot_path
@@ -20,7 +22,12 @@ matplotlib.use('TkAgg')
 
 def run_tracker(tup):
     filename, index = tup
-    os.system('python multiwormtracker.new.py %s' % filename)
+    module_name = os.path.join(imp.find_module("multiwormtracker")[1],
+                               "multiwormtracker_script.py")
+    with open(module_name) as f:
+        multiwormtracker_script = f.read()
+    namespace = {"settings_filename": filename}
+    exec(compile(multiwormtracker_script, module_name, 'exec'), namespace)
     return filename, index
 
 
@@ -116,7 +123,7 @@ class MainApplication(tk.Frame):
     def make_settings_file(self, job, example=False):
         settings = ''
         settings += '### Input\n'
-        settings += 'filename = "%s"\n' % job['video']
+        settings += 'video_filename = "%s"\n' % job['video']
         settings += 'start_frame = %s\n' % job['startframe']
         settings += 'limit_images_to = %s\n' % job['useframes']
         settings += 'fps = %s\n' % job['fps']
@@ -276,13 +283,19 @@ class MainApplication(tk.Frame):
         try:
             with open(filename) as f:
                 settings = f.read()
-            exec(settings)
-        except BaseException:
+            namespace = {}
+            exec(settings, namespace)
+            # HACK: This is way faster than rewriting everything
+            globals().update(namespace)
+        except Exception:
             self.log('Not a valid settings.py file')
+            self.log("".join(traceback.format_exc()))
             return
+        for key in namespace:
+            locals()[key] = namespace[key]
         try:
             job = {}
-            job['video'] = filename
+            job['video'] = video_filename
             job['startframe'] = start_frame
             job['useframes'] = limit_images_to
             job['fps'] = fps
@@ -330,8 +343,9 @@ class MainApplication(tk.Frame):
             except NameError:
                 job['do_full_prune'] = False
             job['regions'] = regions
-        except BaseException:
+        except Exception:
             self.log('Not a valid settings.py file')
+            self.log("".join(traceback.format_exc()))
             return
         self.add_job(job)
 
@@ -1128,7 +1142,7 @@ class AddJob(tk.Toplevel):
                 return False
             try:
                 typed = typeconv(string)
-            except BaseException:
+            except Exception:
                 err = "Error in field '" + fieldname + "'"
                 tkinter.messagebox.showerror('Error', err)
                 return False
@@ -1228,16 +1242,16 @@ class AddJob(tk.Toplevel):
             filenames = (filename,)
         try:
             video = cv2.VideoCapture(filename)
-            n_frames = video.get(cv.CV_CAP_PROP_FRAME_COUNT)
-        except BaseException:
+            n_frames = video.get(cv2.CAP_PROP_FRAME_COUNT)
+        except Exception:
             self.parent.log('Error opening video: ' + filename)
             return
         if n_frames < 0.5:
             self.parent.log('Error opening video: ' + filename)
             return
-        width = video.get(cv.CV_CAP_PROP_FRAME_WIDTH)
-        height = video.get(cv.CV_CAP_PROP_FRAME_HEIGHT)
-        fps = video.get(cv.CV_CAP_PROP_FPS)
+        width = video.get(cv2.CAP_PROP_FRAME_WIDTH)
+        height = video.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        fps = video.get(cv2.CAP_PROP_FPS)
 
         self.videoname.config(state='normal')
         self.videoname.delete(0, tk.END)
@@ -1283,9 +1297,9 @@ class AddJob(tk.Toplevel):
             end = int(self.use_frame.get())
         except BaseException:
             start = 0
-            end = video.get(cv.CV_CAP_PROP_FRAME_COUNT) - 1
+            end = video.get(cv2.CAP_PROP_FRAME_COUNT) - 1
         mid = int((end - start) // 2)
-        video.set(cv.CV_CAP_PROP_POS_FRAMES, mid)
+        video.set(cv2.CAP_PROP_POS_FRAMES, mid)
         ret, frame = video.read()
 
         plt.figure(figsize=(12, 9.5))
@@ -1382,9 +1396,9 @@ class Roi(tk.Toplevel):
             end = int(parent.use_frame.get())
         except BaseException:
             start = 0
-            end = video.get(cv.CV_CAP_PROP_FRAME_COUNT) - 1
+            end = video.get(cv2.CAP_PROP_FRAME_COUNT) - 1
         mid = int((end - start) // 2)
-        video.set(cv.CV_CAP_PROP_POS_FRAMES, mid)
+        video.set(cv2.CAP_PROP_POS_FRAMES, mid)
         ret, frame = video.read()
 
         self.ax.imshow(frame)

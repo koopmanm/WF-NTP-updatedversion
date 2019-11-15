@@ -3,22 +3,15 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from multiprocessing import Pool, cpu_count
 from scipy import interpolate, ndimage
-import scipy.misc
 import cv2
-import cv2.cv as cv
 import os
 import time
-import sys
 import mahotas as mh
 import pandas as pd
 import trackpy as tp
 from skimage import measure, morphology, io
 from math import factorial
 import random
-import time
-import itertools
-from skimage.transform import hough_circle
-from skimage.feature import peak_local_max, canny
 import skimage.draw
 import pickle
 import warnings
@@ -26,20 +19,13 @@ import matplotlib.path as mplPath
 from collections import defaultdict, Counter
 from skimage.transform import resize
 
-if len(sys.argv) == 1:
-    from settings import *
-    import shutil
-    save_as = save_as.rstrip('/') + '/'
-    try:
-        os.mkdir(save_as)
-    except OSError:
-        pass
-    shutil.copyfile('settings.py', '%ssettings.py' % save_as)
-else:
-    settings_filename = sys.argv[1]
-    with open(settings_filename) as f:
-        for line in f:
-            exec(line)
+
+namespace = {}
+with open(settings_filename) as f:
+    code = f.read()
+exec(compile(code, settings_filename, 'exec'), namespace)
+# HACK: This is way faster than rewriting everything
+globals().update(namespace)
 try:  # Backwards compability
     minimum_ecc
 except NameError:
@@ -58,20 +44,19 @@ frames_to_estimate_velocity = min([frames_to_estimate_velocity,
                                    min_track_length])
 bend_threshold /= 100.
 parallel = False
-videoname = filename
+videoname = video_filename
 if not os.path.exists(videoname):
     print(videoname, 'does not exist.')
     exit()
 
 plt.figure(figsize=fig_size)
 
-
 class Video:
     def __init__(self, fname, grey=False):
         self.cap = cv2.VideoCapture(fname)
         self.fname = fname
         self.name = "".join(fname.split(".")[:-1]).replace('/', '_')
-        self.len = self.cap.get(cv.CV_CAP_PROP_FRAME_COUNT) - start_frame
+        self.len = self.cap.get(cv2.CAP_PROP_FRAME_COUNT) - start_frame
         if limit_images_to and limit_images_to < (self.len - start_frame):
             self.len = limit_images_to
         self.grey = grey
@@ -82,7 +67,7 @@ class Video:
                     break
             if len(frame.shape) == 2:
                 self.grey = False
-            self.cap.set(cv.CV_CAP_PROP_POS_FRAMES, 0)
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
     def __next__(self):
         ret = False
@@ -100,7 +85,7 @@ class Video:
             raise StopIteration
 
     def set_index(self, i):
-        self.cap.set(cv.CV_CAP_PROP_POS_FRAMES, i)
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, i)
 
     def restart(self):
         self.set_index(start_frame)
@@ -116,7 +101,6 @@ class Video:
 
     def release(self):
         self.cap.release()
-
 
 video = Video(videoname, grey=True)
 
@@ -944,7 +928,7 @@ def statistics(bends, particles, velocites, areas,
         move_per_bend_std = np.nan
         move_per_bend_mean_std = np.nan
 
-    stats = {	'max_number_worms_present': max_number_worms_present,
+    stats = {    'max_number_worms_present': max_number_worms_present,
               'n_dead': n_dead,
               'n_live': n_live,
               'bpm_mean': bpm_mean,
@@ -1097,26 +1081,25 @@ def print_images(particles, bends, track):
             print_frame(t, particles, P, T, bends, track)
 
 
-if __name__ == '__main__':
-    t0 = time.time()
-    if not os.path.exists(save_as + 'imgs/'):
-        os.mkdir(save_as + 'imgs/')
+t0 = time.time()
+if not os.path.exists(save_as + 'imgs/'):
+    os.mkdir(save_as + 'imgs/')
 
-    # Analysis
-    locations = track_all_locations()
-    track = form_trajectories(locations)
+# Analysis
+locations = track_all_locations()
+track = form_trajectories(locations)
 
-    region, region_particles, bends, particles, velocites, areas, \
-        move_per_bends, bpm, bendsinmovie, appears_in, max_speed, spurious_worms, original_particles, list_number, frames, round_ratio, eccentricity = extract_data(
-            track)
-    check_for_worms(particles)
+region, region_particles, bends, particles, velocites, areas, \
+    move_per_bends, bpm, bendsinmovie, appears_in, max_speed, spurious_worms, original_particles, list_number, frames, round_ratio, eccentricity = extract_data(
+        track)
+check_for_worms(particles)
 
-    # Output
-    write_results_file(region, region_particles, bends, particles,
-                       velocites, areas, move_per_bends, bpm, bendsinmovie,
-                       appears_in, max_speed, track, original_particles, spurious_worms, list_number, frames, round_ratio, eccentricity)
-    print_images(particles, bends, track)
+# Output
+write_results_file(region, region_particles, bends, particles,
+                   velocites, areas, move_per_bends, bpm, bendsinmovie,
+                   appears_in, max_speed, track, original_particles, spurious_worms, list_number, frames, round_ratio, eccentricity)
+print_images(particles, bends, track)
 
-    print('Done (in %.1f minutes).' % ((time.time() - t0) / 60.))
-    video.release()
-    cv2.destroyAllWindows()
+print('Done (in %.1f minutes).' % ((time.time() - t0) / 60.))
+video.release()
+cv2.destroyAllWindows()
