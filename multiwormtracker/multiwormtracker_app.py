@@ -39,7 +39,7 @@ class MainApplication(tk.Frame):
         self.jobindex = 0
         self.jobs = {}
         self.job_buttons = {}
-        self.pool = multiprocessing.Pool(multiprocessing.cpu_count())
+        # self.pool = multiprocessing.Pool(multiprocessing.cpu_count())
         self.editing_job = False
 
         # Main window
@@ -201,8 +201,9 @@ class MainApplication(tk.Frame):
 
         self.log('Job: "%s" started.'
                  % job['video'].split('/')[-1])
-        self.pool.apply_async(run_tracker, ((settingsfilename, index),),
-                              callback=self.finished)
+        self.finished(run_tracker((settingsfilename, index)))
+        # self.pool.apply_async(run_tracker, ((settingsfilename, index),),
+        #                       callback=self.finished)
 
     def finished(self, tup):
         filename, index = tup
@@ -368,8 +369,9 @@ class MainApplication(tk.Frame):
 
         self.log('Job: "%s" example output started.'
                  % job['video'].split('/')[-1])
-        self.pool.apply_async(run_tracker, ((settingsfilename, index),),
-                              callback=self.finished_example)
+        self.finished_example(run_tracker((settingsfilename, index)))
+        # self.pool.apply_async(run_tracker, ((settingsfilename, index),),
+        #                       callback=self.finished_example)
 
     def finished_example(self, tup):
         filename, index = tup
@@ -386,7 +388,7 @@ class MainApplication(tk.Frame):
             del self.jobs[index]
 
     def exit(self):
-        self.pool.close()
+        # self.pool.close()
         self.parent.destroy()
 
 

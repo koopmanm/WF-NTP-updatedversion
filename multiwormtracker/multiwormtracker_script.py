@@ -384,7 +384,7 @@ def track_all_locations():
                  for i, j in apply_indeces]
     t0 = time.time()
     args = list(zip(apply_indeces, Z_indeces))
-    if parallel and not stop_after_example_output:
+    if False and parallel and not stop_after_example_output:
         p = Pool(cpu_count())
         split_results = p.map(locate, args, chunksize=1)
     else:
