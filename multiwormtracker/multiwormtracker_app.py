@@ -14,21 +14,14 @@ import multiprocessing
 import matplotlib
 import traceback
 import imp
+import json
+import threading
 
 import multiwormtracker.radar_chart as radar_chart
 from multiwormtracker.plot_path import plot_path
+from multiwormtracker.multiwormtracker_script import run_tracker as _run_tracker
+from multiwormtracker.multiwormtracker_script import print_images, print_example_frame
 matplotlib.use('TkAgg')
-
-
-def run_tracker(tup):
-    filename, index = tup
-    module_name = os.path.join(imp.find_module("multiwormtracker")[1],
-                               "multiwormtracker_script.py")
-    with open(module_name) as f:
-        multiwormtracker_script = f.read()
-    namespace = {"settings_filename": filename}
-    exec(compile(multiwormtracker_script, module_name, 'exec'), namespace)
-    return filename, index
 
 
 class MainApplication(tk.Frame):
@@ -120,68 +113,6 @@ class MainApplication(tk.Frame):
         for key in self.jobs:
             self.start_job(key)
 
-    def make_settings_file(self, job, example=False):
-        settings = ''
-        settings += '### Input\n'
-        settings += 'video_filename = "%s"\n' % job['video']
-        settings += 'start_frame = %s\n' % job['startframe']
-        settings += 'limit_images_to = %s\n' % job['useframes']
-        settings += 'fps = %s\n' % job['fps']
-        settings += 'px_to_mm = %s\n' % job['px_to_mm']
-        settings += 'darkfield = %s\n' % job['darkfield']
-        if example:
-            settings += 'stop_after_example_output = True\n'
-        else:
-            settings += 'stop_after_example_output = False\n'
-        settings += '\n### Output\n'
-        settings += 'save_as = "%s"\n' % (job['outputname'].rstrip('/') + '/')
-        settings += 'output_overlayed_images = %s\n' % job['outputframes']
-        settings += 'font_size =  %s\n' % job['font_size']
-        settings += 'fig_size = (20,20)\n'  # currently not changeable
-        settings += 'scale_bar_size = 1.0\n'  # currently not changeable
-        settings += 'scale_bar_thickness = 7\n'  # currently not changeable
-        settings += '\n### Z-filtering\n'
-        settings += 'use_images = %s\n' % job['z_use']
-        settings += 'use_around = %s\n' % job['z_padding']
-        settings += 'Z_skip_images = 1\n'
-        settings += '\n### Thresholding\n'
-        settings += 'keep_dead_method = %s\n' % (job['method'] == 'Keep Dead')
-        settings += 'std_px = %s\n' % job['std_px']
-        settings += 'threshold = %s\n' % job['threshold']
-        settings += 'opening = %s\n' % job['opening']
-        settings += 'closing = %s\n' % job['closing']
-        settings += 'skeletonize = %s\n' % job['skeletonize']
-        settings += 'prune_size = %s\n' % job['prune_size']
-        settings += 'do_full_prune = %s\n' % job['do_full_prune']
-        settings += '\n### Locating\n'
-        settings += 'min_size = %s\n' % job['minsize']
-        settings += 'max_size = %s\n' % job['maxsize']
-        settings += 'minimum_ecc = %s\n' % job['minimum_ecc']
-        settings += '\n### Form trajectories\n'
-        settings += 'max_dist_move = %s\n' % job['maxdist']
-        settings += 'min_track_length = %s\n' % job['minlength']
-        settings += 'memory = %s\n' % job['memory']
-        settings += '\n### Bending statistics\n'
-        settings += 'bend_threshold = %s\n' % job['bendthres']
-        settings += 'minimum_bends = %s\n' % job['minbends']
-        settings += '\n### Velocities\n'
-        settings += 'frames_to_estimate_velocity = %s\n' % job['velframes']
-        settings += '\n### Dead worm statistics\n'
-        settings += 'maximum_bpm = %s\n' % job['maxbpm']
-        settings += 'maximum_velocity = %s\n' % job['maxvel']
-        settings += '\n### Regions\n'
-        settings += 'regions = %s\n' % job['regions']
-        settings += '\n### Optimisation tools\n'
-        settings += 'lower = %s\n' % job['lower']  # added new
-        settings += 'upper = %s\n' % job['upper']  # added new
-        # added
-        settings += 'use_average = %s\n' % (job['use_average'] == 'Average')
-        settings += 'cutoff_filter = %s\n' % job['cutoff_filter']
-        settings += 'extra_filter = %s\n' % job['extra_filter']  # added new
-        settings += 'Bends_max = %s\n' % job['Bends_max']  # added new
-        settings += 'Speed_max = %s\n' % job['Speed_max']  # added new
-        return settings
-
     def start_job(self, index):
         job = self.jobs[index]
         job_buttons = self.job_buttons[index]
@@ -189,25 +120,35 @@ class MainApplication(tk.Frame):
 
         # Make output directory
         try:
-            os.mkdir(job['outputname'])
+            os.mkdir(job['save_as'])
         except OSError:
             self.log(
-                'Warning: job folder "%s" already created, overwriting.' % job['outputname'])
+                'Warning: job folder "%s" already created, overwriting.' % job['save_as'])
 
-        settings = self.make_settings_file(job)
-        settingsfilename = job['outputname'].rstrip('/') + '/settings.py'
+        settingsfilename = os.path.join(job['save_as'], 'settings.json')
         with open(settingsfilename, 'w') as f:
-            f.write(settings)
+            json.dump(job, f)
 
         self.log('Job: "%s" started.'
-                 % job['video'].split('/')[-1])
-        self.finished(run_tracker((settingsfilename, index)))
-        # self.pool.apply_async(run_tracker, ((settingsfilename, index),),
-        #                       callback=self.finished)
+                 % job['video_filename'].split('/')[-1])
+        self.run_tracker(job, index)
 
-    def finished(self, tup):
-        filename, index = tup
-        self.log('Finished ' + filename)
+    def run_tracker(self, settings, index):
+
+        def finish(settings, print_data, results):
+            print_example_frame(settings, *print_data)
+            print_images(settings, results)
+            self.finished(settings, index)
+
+        def main():
+            print_data, results = _run_tracker(settings)
+            self.parent.after(1, lambda: finish(settings, print_data, results))
+
+        self.tracker_thread = threading.Thread(target=main)
+        self.tracker_thread.start()
+
+    def finished(self, job, index):
+        self.log('Finished ' + job['video_filename'])
         self.job_buttons[index]['progressbar'].stop()
 
     def log(self, txt):
@@ -222,23 +163,23 @@ class MainApplication(tk.Frame):
         add_job_dialog = AddJob(self)
 
     def add_job(self, job):
-        videonames = job['video'].split(', ')
+        videonames = job['video_filename'].split(', ')
         for videoname in videonames:
             i = self.jobindex
             this_job = deepcopy(job)
-            this_job['video'] = videoname
+            this_job['video_filename'] = videoname
 
             short_videoname = videoname.split('/')[-1]
             append_name = ".".join(short_videoname.split('.')[:-1])
 
             if len(videonames) > 1:
-                this_job['outputname'] += '_' + append_name
+                this_job['save_as'] += '_' + append_name
 
             self.jobs[i] = this_job
 
             if len(short_videoname) > 25:
                 short_videoname = short_videoname[:25]
-            short_outputname = this_job['outputname']
+            short_outputname = this_job['save_as']
             if len(short_outputname) > 50:
                 short_outputname = short_outputname[-50:]
 
@@ -280,72 +221,37 @@ class MainApplication(tk.Frame):
 
     def load_job(self):
         filename = tkinter.filedialog.askopenfilename(
-            title='Locate a settings.py file', filetypes=[("Settings file", "*.py")])
+            title='Locate a settings.json file', filetypes=[("Settings file", "*.json")])
         try:
             with open(filename) as f:
-                settings = f.read()
-            namespace = {}
-            exec(settings, namespace)
-            # HACK: This is way faster than rewriting everything
-            globals().update(namespace)
+                job = json.load(f)
         except Exception:
-            self.log('Not a valid settings.py file')
+            self.log('Not a valid settings.json file')
             self.log("".join(traceback.format_exc()))
             return
-        for key in namespace:
-            locals()[key] = namespace[key]
         try:
-            job = {}
-            job['video'] = video_filename
-            job['startframe'] = start_frame
-            job['useframes'] = limit_images_to
-            job['fps'] = fps
-            job['px_to_mm'] = px_to_mm
-            job['darkfield'] = darkfield
-            job['method'] = 'Keep Dead' if keep_dead_method else 'Z-Filtering'
-            job['z_use'] = use_images
-            job['z_padding'] = use_around
-            job['std_px'] = std_px
-            job['threshold'] = threshold
-            job['opening'] = opening
-            job['closing'] = closing
-            job['minsize'] = min_size
-            job['maxsize'] = max_size
-            job['maxdist'] = max_dist_move
-            job['minlength'] = min_track_length
-            job['memory'] = memory
-            job['bendthres'] = bend_threshold
-            job['minbends'] = minimum_bends
-            job['velframes'] = frames_to_estimate_velocity
-            job['maxbpm'] = maximum_bpm
-            job['maxvel'] = maximum_velocity
-            job['outputname'] = save_as
-            job['outputframes'] = output_overlayed_images
-            job['font_size'] = font_size
-            job['extra_filter'] = extra_filter  # added new
-            job['cutoff_filter'] = cutoff_filter  # new
-            job['lower'] = lower  # added new
-            job['upper'] = upper  # added new
-            job['use_average'] = 'Average' if use_average else 'Maximum'  # added new
-            job['Bends_max'] = Bends_max  # added new
-            job['Speed_max'] = Speed_max  # added new
-            try:  # Backwards compability
-                job['minimum_ecc'] = minimum_ecc
-            except NameError:
-                job['minimum_ecc'] = 0.0
-            try:  # Backwards compability
-                job['skeletonize'] = skeletonize
-                job['prune_size'] = prune_size
-            except NameError:
-                job['skeletonize'] = False
-                job['prune_size'] = 0
-            try:  # Backwards compability
-                job['do_full_prune'] = do_full_prune
-            except NameError:
-                job['do_full_prune'] = False
-            job['regions'] = regions
+            path_keys = ['video_filename', 'save_as']
+            for key in path_keys:
+                if os.path.isabs(job[key]):
+                    continue
+                folder = os.path.dirname(filename)
+                new_path = os.path.join(folder, job[key])
+                job[key] = os.path.abspath(new_path)
+            # Backwards compability
+            if "minimum_ecc" not in job:
+                job["minimum_ecc"] = 0
+            if "skeletonize" not in job:
+                job["skeletonize"] = False
+            if "prune_size" not in job:
+                job["prune_size"] = 0
+            if "do_full_prune" not in job:
+                job["do_full_prune"] = False
+            if "parallel" not in job:
+                job["parallel"] = True
+
+
         except Exception:
-            self.log('Not a valid settings.py file')
+            self.log('Not a valid settings.json file')
             self.log("".join(traceback.format_exc()))
             return
         self.add_job(job)
@@ -357,29 +263,21 @@ class MainApplication(tk.Frame):
 
         # Make output directory
         try:
-            os.mkdir(job['outputname'])
+            os.mkdir(job['save_as'])
         except OSError:
             self.log(
-                'Warning: job folder "%s" already created, overwriting.' % job['outputname'])
+                'Warning: job folder "%s" already created, overwriting.' % job['save_as'])
 
-        settings = self.make_settings_file(job, example=True)
-        settingsfilename = job['outputname'].rstrip('/') + '/settings.py'
+        settingsfilename = job['save_as'].rstrip('/') + '/settings.json'
         with open(settingsfilename, 'w') as f:
-            f.write(settings)
+            json.dump(job, f)
 
         self.log('Job: "%s" example output started.'
-                 % job['video'].split('/')[-1])
-        self.finished_example(run_tracker((settingsfilename, index)))
-        # self.pool.apply_async(run_tracker, ((settingsfilename, index),),
-        #                       callback=self.finished_example)
-
-    def finished_example(self, tup):
-        filename, index = tup
-        self.log('Finished example output ' + filename)
-        self.job_buttons[index]['progressbar'].stop()
+                 % job['video_filename'].split('/')[-1])
+        self.run_tracker(job, index)
 
     def delete_job(self, index):
-        name = self.jobs[index]['video'].split('/')[-1]
+        name = self.jobs[index]['video_filename'].split('/')[-1]
         if tkinter.messagebox.askokcancel("Delete " + name,
                                           "Are you sure you wish delete this job?"):
             self.job_buttons[index]['thisframe'].grid_forget()
@@ -1049,21 +947,21 @@ class AddJob(tk.Toplevel):
 
         ########## EDITING #################
         if editing:
-            self.update_video_info(edit_job['video'])
+            self.update_video_info(edit_job['video_filename'])
 
             # Entries
             self.start_frame.delete(0, 'end')
-            self.start_frame.insert(0, edit_job['startframe'])
+            self.start_frame.insert(0, edit_job['start_frame'])
             self.use_frame.delete(0, 'end')
-            self.use_frame.insert(0, edit_job['useframes'])
+            self.use_frame.insert(0, edit_job['limit_images_to'])
             self.fps.delete(0, 'end')
             self.fps.insert(0, edit_job['fps'])
             self.px_to_mm.delete(0, 'end')
             self.px_to_mm.insert(0, edit_job['px_to_mm'])
             self.z_use.delete(0, 'end')
-            self.z_use.insert(0, edit_job['z_use'])
+            self.z_use.insert(0, edit_job['use_images'])
             self.z_padding.delete(0, 'end')
-            self.z_padding.insert(0, edit_job['z_padding'])
+            self.z_padding.insert(0, edit_job['use_around'])
             self.std_px.delete(0, 'end')
             self.std_px.insert(0, edit_job['std_px'])
             self.threshold.delete(0, 'end')
@@ -1073,27 +971,27 @@ class AddJob(tk.Toplevel):
             self.closing.delete(0, 'end')
             self.closing.insert(0, edit_job['closing'])
             self.minsize.delete(0, 'end')
-            self.minsize.insert(0, edit_job['minsize'])
+            self.minsize.insert(0, edit_job['min_size'])
             self.maxsize.delete(0, 'end')
-            self.maxsize.insert(0, edit_job['maxsize'])
+            self.maxsize.insert(0, edit_job['max_size'])
             self.maxdist.delete(0, 'end')
-            self.maxdist.insert(0, edit_job['maxdist'])
+            self.maxdist.insert(0, edit_job['max_dist_move'])
             self.minlength.delete(0, 'end')
-            self.minlength.insert(0, edit_job['minlength'])
+            self.minlength.insert(0, edit_job['min_track_length'])
             self.memory.delete(0, 'end')
             self.memory.insert(0, edit_job['memory'])
             self.bendthres.delete(0, 'end')
-            self.bendthres.insert(0, edit_job['bendthres'])
+            self.bendthres.insert(0, edit_job['bend_threshold'])
             self.minbends.delete(0, 'end')
-            self.minbends.insert(0, edit_job['minbends'])
+            self.minbends.insert(0, edit_job['minimum_bends'])
             self.velframes.delete(0, 'end')
-            self.velframes.insert(0, edit_job['velframes'])
+            self.velframes.insert(0, edit_job['frames_to_estimate_velocity'])
             self.maxbpm.delete(0, 'end')
-            self.maxbpm.insert(0, edit_job['maxbpm'])
+            self.maxbpm.insert(0, edit_job['maximum_bpm'])
             self.maxvel.delete(0, 'end')
-            self.maxvel.insert(0, edit_job['maxvel'])
+            self.maxvel.insert(0, edit_job['maximum_velocity'])
             self.outputframes.delete(0, 'end')
-            self.outputframes.insert(0, edit_job['outputframes'])
+            self.outputframes.insert(0, edit_job['output_overlayed_images'])
             self.font_size.delete(0, 'end')
             self.font_size.insert(0, edit_job['font_size'])
             self.minimum_ecc.delete(0, 'end')
@@ -1116,10 +1014,10 @@ class AddJob(tk.Toplevel):
             self.extra_filter.set(edit_job['extra_filter'])  # new
             self.cutoff_filter.set(edit_job['cutoff_filter'])  # new
             self.use_average.current(
-                1 if edit_job['use_average'] == 'Maximum' else 0)  # new
-            self.method.current(1 if edit_job['method'] == 'Keep Dead' else 0)
+                1 if not edit_job['use_average'] else 0)  # new
+            self.method.current(1 if job['keep_dead_method'] else 0)
             self.outputname.configure(state='normal')
-            self.outputname.insert(0, edit_job['outputname'])
+            self.outputname.insert(0, edit_job['save_as'])
             self.outputname.configure(state='readonly')
 
             # Region of interests:
@@ -1154,11 +1052,11 @@ class AddJob(tk.Toplevel):
     def add_job(self):
         job = {}
         add = self.add_to_job
-        if not add(job, 'video', self.videoname, str):
+        if not add(job, 'video_filename', self.videoname, str):
             return
-        if not add(job, 'startframe', self.start_frame, int):
+        if not add(job, 'start_frame', self.start_frame, int):
             return
-        if not add(job, 'useframes', self.use_frame, int):
+        if not add(job, 'limit_images_to', self.use_frame, int):
             return
         if not add(job, 'fps', self.fps, float):
             return
@@ -1170,13 +1068,13 @@ class AddJob(tk.Toplevel):
             return  # new
         if not add(job, 'cutoff_filter', self.cutoff_filter, bool):
             return  # new
-        if not add(job, 'method', self.method, str):
+        if not add(job, 'keep_dead_method', self.method == 'Keep Dead', bool):
             return
-        if not add(job, 'use_average', self.use_average, str):
+        if not add(job, 'use_average', self.use_average == 'Average', str):
             return  # new
-        if not add(job, 'z_use', self.z_use, int):
+        if not add(job, 'use_images', self.z_use, int):
             return
-        if not add(job, 'z_padding', self.z_padding, int):
+        if not add(job, 'use_around', self.z_padding, int):
             return
         if not add(job, 'std_px', self.std_px, int):
             return
@@ -1200,29 +1098,29 @@ class AddJob(tk.Toplevel):
             return  # new
         if not add(job, 'Speed_max', self.Speed_max, float):
             return  # new
-        if not add(job, 'minsize', self.minsize, int):
+        if not add(job, 'min_size', self.minsize, int):
             return
-        if not add(job, 'maxsize', self.maxsize, int):
+        if not add(job, 'max_size', self.maxsize, int):
             return
-        if not add(job, 'maxdist', self.maxdist, int):
+        if not add(job, 'max_dist_move', self.maxdist, int):
             return
-        if not add(job, 'minlength', self.minlength, int):
+        if not add(job, 'min_track_length', self.minlength, int):
             return
         if not add(job, 'memory', self.memory, int):
             return
-        if not add(job, 'bendthres', self.bendthres, float):
+        if not add(job, 'bend_threshold', self.bendthres, float):
             return
-        if not add(job, 'minbends', self.minbends, float):
+        if not add(job, 'minimum_bends', self.minbends, float):
             return
-        if not add(job, 'velframes', self.velframes, int):
+        if not add(job, 'frames_to_estimate_velocity', self.velframes, int):
             return
-        if not add(job, 'maxbpm', self.maxbpm, float):
+        if not add(job, 'maximum_bpm', self.maxbpm, float):
             return
-        if not add(job, 'maxvel', self.maxvel, float):
+        if not add(job, 'maximum_velocity', self.maxvel, float):
             return
-        if not add(job, 'outputname', self.outputname, str):
+        if not add(job, 'save_as', self.outputname, str):
             return
-        if not add(job, 'outputframes', self.outputframes, int):
+        if not add(job, 'output_overlayed_images', self.outputframes, int):
             return
         if not add(job, 'minimum_ecc', self.minimum_ecc, float):
             return
