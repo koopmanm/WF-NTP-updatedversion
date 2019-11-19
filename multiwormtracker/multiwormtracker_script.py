@@ -18,46 +18,94 @@ import warnings
 import matplotlib.path as mplPath
 from collections import defaultdict, Counter
 from skimage.transform import resize
+import json
 
 
-namespace = {}
-with open(settings_filename) as f:
-    code = f.read()
-exec(compile(code, settings_filename, 'exec'), namespace)
-# HACK: This is way faster than rewriting everything
-globals().update(namespace)
-try:  # Backwards compability
-    minimum_ecc
-except NameError:
-    minimum_ecc = 0
-try:  # Backwards compability
-    skeletonize
-except NameError:
-    skeletonize = False
-    prune_size = 0
-try:  # Backwards compability
-    do_full_prune
-except BaseException:
-    do_full_prune = False
+def run_tracker(settings):
+    """Run the tracker with the given settings."""
 
-frames_to_estimate_velocity = min([frames_to_estimate_velocity,
-                                   min_track_length])
-bend_threshold /= 100.
-parallel = False
-videoname = video_filename
-if not os.path.exists(videoname):
-    print(videoname, 'does not exist.')
-    exit()
+    # Backwards compability
+    if "minimum_ecc" not in settings:
+        settings["minimum_ecc"] = 0
+    if "skeletonize" not in settings:
+        settings["skeletonize"] = False
+    if "prune_size" not in settings:
+        settings["prune_size"] = 0
+    if "do_full_prune" not in settings:
+        settings["do_full_prune"] = False
 
-plt.figure(figsize=fig_size)
+    # Do some adjustments
+    settings["frames_to_estimate_velocity"] = min([
+        settings["frames_to_estimate_velocity"],
+        settings["min_track_length"]])
+    settings["bend_threshold"] /= 100.
+
+    # Disable parallel processing
+    settings["parallel"] = False
+
+    video = Video(settings, grey=True)
+
+    print('Video shape:', video[0].shape)
+
+    regions = settings["regions"]
+    try:
+        len(regions)
+    except Exception:
+        regions = {}
+    if len(regions) == 0:
+        im = np.ones_like(video[0])
+        regions["all"] = im > 0.1
+    else:
+        regions["all"] = np.zeros_like(video[0])
+        for key, d in list(regions.items()):
+            im = np.zeros_like(video[0])
+            rr, cc = skimage.draw.polygon(np.array(d['y']), np.array(d['x']))
+            try:
+                im[rr, cc] = 1
+            except IndexError:
+                print('Region "', key, '" cannot be applied to video',
+                      settings["video_filename"])
+                print('Input image sizes do not match.')
+                return
+            regions["all"] += im
+        regions["all"] = regions["all"] > 0.1
+    settings["regions"] = regions
+
+    t0 = time.time()
+    save_folder = settings["save_as"]
+    ims_folder = os.path.join(save_folder, 'imgs')
+    if not os.path.exists(ims_folder):
+        os.mkdir(ims_folder)
+
+    # Analysis
+    locations = track_all_locations(video, settings)
+    track = form_trajectories(locations, settings)
+
+    results = extract_data(track)
+    if not check_for_worms(results["particles"]):
+        print('No worms detected. Stopping!')
+        return
+    # Output
+    write_results_file(results, settings)
+
+    print('Done (in %.1f minutes).' % ((time.time() - t0) / 60.))
+    video.release()
+    return results
 
 class Video:
-    def __init__(self, fname, grey=False):
-        self.cap = cv2.VideoCapture(fname)
-        self.fname = fname
-        self.name = "".join(fname.split(".")[:-1]).replace('/', '_')
-        self.len = self.cap.get(cv2.CAP_PROP_FRAME_COUNT) - start_frame
-        if limit_images_to and limit_images_to < (self.len - start_frame):
+    def __init__(self, settings, grey=False):
+        video_filename = settings["video_filename"]
+        if not os.path.exists(video_filename):
+            raise RuntimeError(f"{video_filename} does not exist.")
+        self.cap = cv2.VideoCapture(video_filename)
+        self.fname = video_filename
+        self.name = "".join(video_filename.split(".")[:-1]).replace('/', '_')
+        self.len = (self.cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                    - settings["start_frame"])
+        self.start_frame = settings["start_frame"]
+        limit_images_to = settings["limit_images_to"]
+        if (limit_images_to
+              and limit_images_to < (self.len - self.start_frame)):
             self.len = limit_images_to
         self.grey = grey
         if grey:
@@ -88,12 +136,12 @@ class Video:
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, i)
 
     def restart(self):
-        self.set_index(start_frame)
+        self.set_index(self.start_frame)
 
     def __getitem__(self, i):
         if i < 0:
             i += self.len
-        self.set_index(start_frame + i)
+        self.set_index(self.start_frame + i)
         return next(self)
 
     def __len__(self):
@@ -102,40 +150,12 @@ class Video:
     def release(self):
         self.cap.release()
 
-video = Video(videoname, grey=True)
-
-print('Video shape:', video[0].shape)
-
-region_shapes = {}
-try:
-    len(regions)
-except BaseException:
-    regions = {}
-if len(regions) == 0:
-    im = np.ones_like(video[0])
-    regions["all"] = im > 0.1
-    all_regions = im > 0.1
-else:
-    all_regions = np.zeros_like(video[0])
-    for key, d in list(regions.items()):
-        im = np.zeros_like(video[0])
-        rr, cc = skimage.draw.polygon(np.array(d['y']), np.array(d['x']))
-        try:
-            im[rr, cc] = 1
-        except IndexError:
-            print('Region "', key, '" cannot be applied to video', videoname)
-            print('Input image sizes do not match.')
-            exit()
-        all_regions += im
-        region_shapes[key] = im > 0.1
-    all_regions = all_regions > 0.1
-
 
 def savitzky_golay(y, window_size, order, deriv=0, rate=1):
     try:
         window_size = np.abs(np.int(window_size))
         order = np.abs(np.int(order))
-    except ValueError as msg:
+    except ValueError:
         raise ValueError("window_size and order have to be of type int")
     if window_size % 2 != 1 or window_size < 1:
         raise TypeError("window_size size must be a positive odd number")
@@ -155,22 +175,22 @@ def savitzky_golay(y, window_size, order, deriv=0, rate=1):
     return np.convolve(m[::-1], y, mode='valid')
 
 
-def find_Z(i0, i1):
+def find_Z(video, settings, i0, i1):
     # Adjust brightness:
     frame = video[(i0 + i1) // 2]
     mean_brightness = np.mean(frame)
     if mean_brightness > 1:
         mean_brightness /= 255.
     Z = np.zeros_like(frame, dtype=np.float64)
-    if darkfield:
+    if settings["darkfield"]:
         minv = np.zeros_like(frame, dtype=np.float64) + 256
     else:
         minv = np.zeros_like(frame, dtype=np.float64) - 256
-    for i in range(i0, i1, Z_skip_images):
+    for i in range(i0, i1, settings["Z_skip_images"]):
         frame = video[i]
         frame = frame * mean_brightness / np.mean(frame)
         diff = frame
-        if darkfield:
+        if settings["darkfield"]:
             logger = diff < minv
         else:
             logger = diff > minv
@@ -179,85 +199,36 @@ def find_Z(i0, i1):
     return Z, mean_brightness
 
 
-def find_Z_withdead(i0, i1):
+def find_Z_withdead(video, settings, i0, i1):
     frame = video[(i0 + i1) // 2]
     Y, X = np.meshgrid(np.arange(frame.shape[1]),
                        np.arange(frame.shape[0]))
-    thres = cv2.adaptiveThreshold(frame, 1, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                  cv2.THRESH_BINARY, 2 * (std_px // 2) + 1, 0) < 0.5
-    vals = frame[~thres]
-    x = X[~thres]
-    y = Y[~thres]
+    thres = cv2.adaptiveThreshold(
+        frame, 1, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY, 2 * (settings["std_px"] // 2) + 1, 0) < 0.5
+    mask = np.logical_not(thres)
+    vals = frame[mask]
+    x = X[mask]
+    y = Y[mask]
     Z = interpolate.griddata((x, y), vals, (X, Y), method='nearest')
     return Z, False
 
 
-def small_imshow(img, *args, **kwargs):
-    # For large images/frames matplotlib's imshow gives memoryerror
-    # This is solved by resizing before plotting
-    s = img.shape
-    b = img
-    if (s[0] + s[1]) / 2. > 1500:
-        factor = 1500 / ((s[0] + s[1]) / 2.)
-        b = resize(img, (int(s[0] * factor), int(s[1] * factor)),
-                   preserve_range=True)
-    plt.clf()
-    plt.imshow(b, *args, extent=[0, s[1], s[0], 0], **kwargs)
-
-
-def output_processing_frames(frameorig, Z, frame, thresholded,
-                             frame_after_open, frame_after_close, labeled, labeled_removed,
-                             skel_labeled=None):
-    small_imshow(frameorig, cmap=cm.gray)
-    plt.savefig('%s0frameorig.jpg' % save_as)
-
-    small_imshow(Z, cmap=cm.gray)
-    plt.savefig('%s0z.jpg' % save_as)
-
-    small_imshow(frame, cmap=cm.gray)
-    plt.savefig('%s1framesubtract.jpg' % save_as)
-
-    small_imshow(thresholded, cmap=cm.binary)
-    plt.savefig('%s2thresholded.jpg' % save_as)
-
-    small_imshow(frame_after_open, cmap=cm.binary)
-    plt.savefig('%s3opened.jpg' % save_as)
-
-    small_imshow(frame_after_close, cmap=cm.binary)
-    plt.savefig('%s4closed.jpg' % save_as)
-
-    small_imshow(labeled, cmap=cm.binary)
-    plt.savefig('%s5labelled.jpg' % save_as)
-
-    small_imshow(labeled_removed, cmap=cm.binary)
-    plt.savefig('%s6removed.jpg' % save_as)
-
-    if skel_labeled is not None:
-        small_imshow(skel_labeled, cmap=cm.binary)
-        plt.savefig('%s7skeletonized.jpg' % save_as)
-    plt.clf()
-
-
-skel_endpoints1 = np.array([[0, 0, 0], [0, 1, 0], [2, 1, 2]])
-skel_endpoints2 = np.array([[0, 0, 0], [0, 1, 2], [0, 2, 1]])
-skel_endpoints3 = np.array([[0, 0, 2], [0, 1, 1], [0, 0, 2]])
-skel_endpoints4 = np.array([[0, 2, 1], [0, 1, 2], [0, 0, 0]])
-skel_endpoints5 = np.array([[2, 1, 2], [0, 1, 0], [0, 0, 0]])
-skel_endpoints6 = np.array([[1, 2, 0], [2, 1, 0], [0, 0, 0]])
-skel_endpoints7 = np.array([[2, 0, 0], [1, 1, 0], [2, 0, 0]])
-skel_endpoints8 = np.array([[0, 0, 0], [2, 1, 0], [1, 2, 0]])
-
-
 def find_skel_endpoints(skel):
-    ep1 = mh.morph.hitmiss(skel, skel_endpoints1)
-    ep2 = mh.morph.hitmiss(skel, skel_endpoints2)
-    ep3 = mh.morph.hitmiss(skel, skel_endpoints3)
-    ep4 = mh.morph.hitmiss(skel, skel_endpoints4)
-    ep5 = mh.morph.hitmiss(skel, skel_endpoints5)
-    ep6 = mh.morph.hitmiss(skel, skel_endpoints6)
-    ep7 = mh.morph.hitmiss(skel, skel_endpoints7)
-    ep8 = mh.morph.hitmiss(skel, skel_endpoints8)
-    ep = ep1 + ep2 + ep3 + ep4 + ep5 + ep6 + ep7 + ep8
+    skel_endpoints = [
+        np.array([[0, 0, 0], [0, 1, 0], [2, 1, 2]]),
+        np.array([[0, 0, 0], [0, 1, 2], [0, 2, 1]]),
+        np.array([[0, 0, 2], [0, 1, 1], [0, 0, 2]]),
+        np.array([[0, 2, 1], [0, 1, 2], [0, 0, 0]]),
+        np.array([[2, 1, 2], [0, 1, 0], [0, 0, 0]]),
+        np.array([[1, 2, 0], [2, 1, 0], [0, 0, 0]]),
+        np.array([[2, 0, 0], [1, 1, 0], [2, 0, 0]]),
+        np.array([[0, 0, 0], [2, 1, 0], [1, 2, 0]])]
+
+    ep = 0
+    for skel_endpoint in skel_endpoints:
+        ep += mh.morph.hitmiss(skel, skel_endpoint)
+
     return ep
 
 
@@ -284,33 +255,38 @@ def prune_fully(skel_labeled):
     return skel_labeled
 
 
-def apply_Z(i0, i1, Z, mean_brightness):
+def apply_Z(video, settings, i0, i1, Z, mean_brightness):
     """Thresholds images with indeces i0 to i1 by using Z"""
     results = []
     for i in range(i0, i1):
         print(' : Locating in frame %i/%i'
-              % (i + 1 + start_frame, len(video) + start_frame))
+              % (i + 1 + settings["start_frame"],
+                 len(video) + settings["start_frame"]))
         frameorig = video[i]
 
         if mean_brightness:
             frame = frameorig * mean_brightness / np.mean(frameorig)
         else:
             frame = np.array(frameorig, dtype=np.float64)
-        frame = np.abs(frame - Z) * all_regions
+        frame = np.abs(frame - Z) * settings["regions"]["all"]
         if (frame > 1.1).any():
             frame /= 255.
 
-        thresholded = frame > (threshold / 255.)
-
+        thresholded = frame > (settings["threshold"] / 255.)
+        opening = settings["opening"]
+        closing = settings["closing"]
+        save_folder = settings["save_as"]
         if opening > 0:
             frame_after_open = ndimage.binary_opening(
-                thresholded, structure=np.ones((opening, opening))).astype(np.int)
+                thresholded,
+                structure=np.ones((opening, opening))).astype(np.int)
         else:
             frame_after_open = thresholded
 
         if closing > 0:
             frame_after_close = ndimage.binary_closing(
-                frame_after_open, structure=np.ones((closing, closing))).astype(np.int)
+                frame_after_open,
+                structure=np.ones((closing, closing))).astype(np.int)
         else:
             frame_after_close = frame_after_open
 
@@ -318,8 +294,8 @@ def apply_Z(i0, i1, Z, mean_brightness):
             (3, 3), bool))  # change here?
         sizes = mh.labeled.labeled_size(labeled)
 
-        remove = np.where(np.logical_or(sizes < min_size,
-                                        sizes > max_size))
+        remove = np.where(np.logical_or(sizes < settings["min_size"],
+                                        sizes > settings["max_size"]))
         labeled_removed = mh.labeled.remove_regions(labeled, remove)
         labeled_removed, n_left = mh.labeled.relabel(labeled_removed)
 
@@ -330,12 +306,13 @@ def apply_Z(i0, i1, Z, mean_brightness):
                       "minor_axis_length":props[j].minor_axis_length /
                       (props[j].major_axis_length + 0.001)}
                      for j in range(len(props))]
-        if skeletonize:
+        if settings["skeletonize"]:
             skeletonized_frame = morphology.skeletonize(frame_after_close)
-            skeletonized_frame = prune(skeletonized_frame, prune_size)
+            skeletonized_frame = prune(skeletonized_frame,
+                                       settings["prune_size"])
 
             skel_labeled = labeled_removed * skeletonized_frame
-            if do_full_prune:
+            if settings["do_full_prune"]:
                 skel_labeled = prune_fully(skel_labeled)
 
             skel_props = measure.regionprops(skel_labeled)
@@ -348,49 +325,52 @@ def apply_Z(i0, i1, Z, mean_brightness):
 
         results.append(prop_list)
 
-        if i == 0:
-            print('Sizes:')
-            print(sizes)
+        # if i == i0:
+        #     print('Sizes:')
+        #     print(sizes)
 
-            output_processing_frames(frameorig, Z, frame, thresholded,
-                                     frame_after_open, frame_after_close, labeled, labeled_removed,
-                                     (skel_labeled if skeletonize else None))
-            print('Example frame outputted!')
-            if stop_after_example_output:
-                return
+        #     output_processing_frames(
+        #         save_folder, frameorig, Z, frame, thresholded,
+        #         frame_after_open, frame_after_close, labeled, labeled_removed,
+        #         (skel_labeled if settings["skeletonize"] else None))
+        #     print('Example frame outputted!')
+        #     if settings["stop_after_example_output"]:
+        #         return
+
+        output_overlayed_images = settings["output_overlayed_images"]
         if i < output_overlayed_images or output_overlayed_images is None:
             warnings.filterwarnings("ignore")
-            io.imsave('%s/imgs/%05d.jpg' % (save_as, i),
+            io.imsave(os.path.join(save_folder, "imgs", '%05d.jpg' % (i)),
                       np.array(labeled_removed == 0, dtype=np.float32))
             warnings.filterwarnings("default")
 
     return results
 
 
-def locate(args):
-    i, zi = args
-    if keep_dead_method:
-        Z, mean_brightness = find_Z_withdead(*zi)
-    else:
-        Z, mean_brightness = find_Z(*zi)
-    return apply_Z(*i, Z=Z, mean_brightness=mean_brightness)
-
-
-def track_all_locations():
+def track_all_locations(video, settings):
+    def locate(args):
+        i, zi = args
+        if settings["keep_dead_method"]:
+            Z, mean_brightness = find_Z_withdead(video, settings, *zi)
+        else:
+            Z, mean_brightness = find_Z(video, settings, *zi)
+        return apply_Z(video, settings, *i, Z=Z,
+                       mean_brightness=mean_brightness)
     apply_indeces = list(
-        map(int, list(np.linspace(0, len(video), len(video) // use_images + 2))))
+        map(int, list(np.linspace(0, len(video),
+                                  len(video) // settings["use_images"] + 2))))
     apply_indeces = list(zip(apply_indeces[:-1], apply_indeces[1:]))
-    Z_indeces = [(max([0, i - use_around]), min(j + use_around, len(video)))
+    Z_indeces = [(max([0, i - settings["use_around"]]),
+                  min(j + settings["use_around"], len(video)))
                  for i, j in apply_indeces]
-    t0 = time.time()
     args = list(zip(apply_indeces, Z_indeces))
-    if False and parallel and not stop_after_example_output:
+    if settings["parallel"] and not settings["stop_after_example_output"]:
         p = Pool(cpu_count())
         split_results = p.map(locate, args, chunksize=1)
     else:
-        if stop_after_example_output:
+        if settings["stop_after_example_output"]:
             locate(args[0])
-            exit()
+            raise KeyboardInterrupt
         else:
             split_results = list(map(locate, args))
     locations = []
@@ -399,7 +379,7 @@ def track_all_locations():
     return locations
 
 
-def form_trajectories(loc):
+def form_trajectories(loc, settings):
     global particles, P, T, bends, track
     print()
     print('Forming worm trajectories...', end=' ')
@@ -417,40 +397,40 @@ def form_trajectories(loc):
         data['frame'] += [t] * len(l)
     data = pd.DataFrame(data)
     try:
-        track = tp.link_df(data, search_range=max_dist_move, memory=memory)
+        track = tp.link_df(data, search_range=settings["max_dist_move"],
+                           memory=settings["memory"])
     except tp.linking.SubnetOversizeException:
-        print('Linking problem too complex. Reduce maximum move distance or memory.')
-        print('Stopping.')
-        exit()
-    track = tp.filter_stubs(track, min([min_track_length, len(loc)]))
+        raise RuntimeError(
+            'Linking problem too complex.'
+            ' Reduce maximum move distance or memory.')
+    track = tp.filter_stubs(track, min([settings["min_track_length"],
+                                        len(loc)]))
     try:
-        trackfile = open('%strack.p' % save_as, 'w')
-        pickle.dump(track, trackfile)
-        trackfile.close()
-    except BaseException:
+        with open(os.path.join(settings["save_as"], 'track.p'), 'w') as trackfile:
+            pickle.dump(track, trackfile)
+    except Exception:
         print('Warning: no track file saved. Track too long.')
         print('         plot_path.py will not work on this file.')
 
     return track
 
 
-def check_for_worms(particles):
+def check_for_worms(particles, settings):
     if len(particles) == 0:
-        f = open('%s/results.txt' % save_as, 'w')
-        f.write('---------------------------------\n')
-        f.write('    Results for %s \n' % videoname)
-        f.write('---------------------------------\n\n')
-        f.write('No worms detected. Check your settings.\n\n')
-        f.close()
-        print('No worms detected. Stopping!')
-        exit()
+        with open(os.path.join(settings["save_as"], 'results.txt'), 'w') as f:
+            f.write('---------------------------------\n')
+            f.write('    Results for %s \n' % settings["video_filename"])
+            f.write('---------------------------------\n\n')
+            f.write('No worms detected. Check your settings.\n\n')
+        return False
+    return True
 
 
 def make_region_paths(regions):
     reg_paths = {}
     for key, d in list(regions.items()):
-        reg_paths[key] = mplPath.Path(np.array(list(zip(d['x'] + [d['x'][0]],
-                                                        d['y'] + [d['y'][0]]))))
+        reg_paths[key] = mplPath.Path(
+            np.array(list(zip(d['x'] + [d['x'][0]], d['y'] + [d['y'][0]]))))
     return reg_paths
 
 
@@ -462,7 +442,7 @@ def identify_region(xs, ys, reg_paths):
     return None
 
 
-def extract_bends(x, smooth_y):
+def extract_bends(x, smooth_y, settings):
     # Find extrema
     ex = (np.diff(np.sign(np.diff(smooth_y))).nonzero()[0] + 1)
     if len(ex) >= 2 and ex[0] == 0:
@@ -476,7 +456,7 @@ def extract_bends(x, smooth_y):
     prev_index = 0
     while index < len(bend_magnitude):
         dist = abs(bend_magnitude[index] - bend_magnitude[prev_index])
-        if dist < bend_threshold:
+        if dist < settings["bend_threshold"]:
             idx[index] = 0
             if index < len(bend_magnitude) - 1:
                 idx[index + 1] = 0
@@ -500,26 +480,28 @@ def form_bend_array(bend_times, t_p):
     return bl
 
 
-def extract_velocity(tt, xx, yy):
-    ftev = frames_to_estimate_velocity
+def extract_velocity(tt, xx, yy, settings):
+    ftev = settings["frames_to_estimate_velocity"]
     dtt = -(np.roll(tt, ftev) - tt)[ftev:]
     dxx = (np.roll(xx, ftev) - xx)[ftev:]
     dyy = (np.roll(yy, ftev) - yy)[ftev:]
-    velocity = px_to_mm * np.median(np.sqrt(dxx**2 + dyy**2) / dtt) * fps
+    velocity = (settings["px_to_mm"] * settings["fps"]
+                * np.median(np.sqrt(dxx**2 + dyy**2) / dtt))
     return velocity
 
 
-def extract_max_speed(tt, xx, yy):
-    ftev = frames_to_estimate_velocity
+def extract_max_speed(tt, xx, yy, settings):
+    ftev = settings["frames_to_estimate_velocity"]
     dtt = -(np.roll(tt, ftev) - tt)[ftev:]
     dxx = (np.roll(xx, ftev) - xx)[ftev:]
     dyy = (np.roll(yy, ftev) - yy)[ftev:]
-    percentile = px_to_mm * \
-        np.percentile((np.sqrt(dxx**2 + dyy**2) / dtt), 90) * fps
+    percentile = (
+        settings["px_to_mm"] * settings["fps"] *
+        np.percentile((np.sqrt(dxx**2 + dyy**2) / dtt), 90))
     return percentile
 
 
-def extract_move_per_bend(bl, tt, xx, yy):
+def extract_move_per_bend(bl, tt, xx, yy, px_to_mm):
     bend_i = 1
     j = 0
     dists = []
@@ -541,7 +523,7 @@ def extract_move_per_bend(bl, tt, xx, yy):
         return np.nan
 
 
-def extract_data(track):
+def extract_data(track, settings):
     P = track['particle']
     particles = list(set(P))
     T = track['frame']
@@ -557,6 +539,7 @@ def extract_data(track):
     region_particles = defaultdict(list)
     round_ratio = []
 
+    regions = settings["regions"]
     if len(regions) > 1:
         reg_paths = make_region_paths(regions)
 
@@ -566,7 +549,7 @@ def extract_data(track):
         t = T[P == p]
         ecc = track['eccentricity'][P == p]
         area_ecc = track['area_eccentricity'][P == p]
-        mal = track['minor_axis_length'][P == p]
+        # mal = track['minor_axis_length'][P == p]
         area = track['area'][P == p]
 
         # Smooth bend signal
@@ -582,7 +565,7 @@ def extract_data(track):
 
         # Interpolate circle-like worms
         # (these are removed later if count is low)
-        idx = area_ecc > minimum_ecc
+        idx = area_ecc > settings["minimum_ecc"]
         if sum(idx) > 0:
             smooth_y = np.interp(x, x[idx], smooth_y[idx])
             roundness = 1.0 - float(sum(idx)) / float(len(idx))
@@ -595,8 +578,8 @@ def extract_data(track):
             round_ratio.append(roundness)
 
         # Bends
-        bend_times = extract_bends(x, smooth_y)
-        if len(bend_times) < minimum_bends:
+        bend_times = extract_bends(x, smooth_y, settings)
+        if len(bend_times) < settings["minimum_bends"]:
             del particles[pi]
             continue
         bl = form_bend_array(bend_times, T[P == p])
@@ -605,8 +588,9 @@ def extract_data(track):
         else:
             bends.append(np.array([0.0] * len(T[P == p])))
 
+        px_to_mm = settings["px_to_mm"]
         # Area
-        if skeletonize:
+        if settings["skeletonize"]:
             areas.append(np.median(area) * px_to_mm)
         else:
             areas.append(np.median(area) * px_to_mm**2)
@@ -615,28 +599,30 @@ def extract_data(track):
         eccentricity.append(np.mean(area_ecc))
 
         # Velocity
-        velocity = extract_velocity(T[P == p], X[P == p], Y[P == p])
+        velocity = extract_velocity(T[P == p], X[P == p], Y[P == p], settings)
         velocites.append(velocity)
 
         # Max velocity: 90th percentile to avoid skewed results due to tracking
         # inefficiency
-        max_speeds = extract_max_speed(T[P == p], X[P == p], Y[P == p])
+        max_speeds = extract_max_speed(T[P == p], X[P == p], Y[P == p],
+                                       settings)
         max_speed.append(max_speeds)
 
         # Move per bend
         move_per_bend = extract_move_per_bend(
-            bends[-1], T[P == p], X[P == p], Y[P == p])
+            bends[-1], T[P == p], X[P == p], Y[P == p], px_to_mm)
         move_per_bends.append(move_per_bend)
 
     # Appended lists need to be reversed to same order as particles
     bends, velocites, areas, \
-        max_speed, move_per_bends, round_ratio, eccentricity = [list(reversed(x)) for x in [
-            bends, velocites, areas,
-            max_speed, move_per_bends, round_ratio, eccentricity]]
+        max_speed, move_per_bends, round_ratio, eccentricity = [
+            list(reversed(x)) for x in [
+                bends, velocites, areas,
+                max_speed, move_per_bends, round_ratio, eccentricity]]
 
     # Sort out low bend number particles
     for i in reversed(list(range(len(bends)))):
-        if bends[i][-1] < minimum_bends:
+        if bends[i][-1] < settings["minimum_bends"]:
             del bends[i]
             del particles[i]
             del velocites[i]
@@ -651,26 +637,27 @@ def extract_data(track):
     bpm = []  # beats per minute
     bendsinmovie = []
     appears_in = []
+    fps = settings["fps"]
     for i, p in enumerate(particles):
         bpm.append(bends[i][-1] / np.ptp(T[P == p]) * 60 * fps)
-        x = (limit_images_to / fps)
+        x = (settings["limit_images_to"] / fps)
         bendsinmovie.append(
             bends[i][-1] / np.ptp(T[P == p]) * x * fps)  # CHANGE
         appears_in.append(len(bends[i]))
 
     # Cut off-tool for skewed statistics
-    if cutoff_filter == True:
+    if settings["cutoff_filter"]:
         list_number = []
         frames = []
         for t in set(T):
-            if t >= lower and t <= upper:
+            if t >= settings["lower"] and t <= settings["upper"]:
                 particles_present = len(set(P[T == t]))
                 frames.append(t)
                 list_number.append(particles_present)
 
         list_number = np.array(list_number)
 
-        if use_average == True:
+        if settings["use_average"]:
             cut_off = int(np.sum(list_number) / len(list_number)) + \
                 (np.sum(list_number) % len(list_number) > 0)
         else:
@@ -697,9 +684,10 @@ def extract_data(track):
 
     # Cut off-tool for boundaries (spurious worms)
     spurious_worms = 0
-    if extra_filter == True:
+    if settings["extra_filter"]:
         for i in reversed(list(range(len(bends)))):
-            if bpm[i] > Bends_max and velocites[i] < Speed_max:
+            if (bpm[i] > settings["Bends_max"]
+                  and velocites[i] < settings["Speed_max"]):
                 del bends[i]
                 del particles[i]
                 del velocites[i]
@@ -726,18 +714,31 @@ def extract_data(track):
         region.append(this_reg)
         region_particles[this_reg].append(p)
 
-    region, bends, bpm, bendsinmovie, appears_in, particles, velocites, areas, \
-        move_per_bends, max_speed, round_ratio, eccentricity = list(map(np.array, [region, bends, bpm, bendsinmovie, appears_in, particles,
-                                                                                   velocites, areas, move_per_bends, max_speed, round_ratio, eccentricity]))
+    results = pd.DataFrame(dict(
+        region=region,
+        region_particles=region_particles,
+        bends=bends,
+        particles=particles,
+        velocites=velocites,
+        areas=areas,
+        move_per_bends=move_per_bends,
+        bpm=bpm,
+        bendsinmovie=bendsinmovie,
+        appears_in=appears_in,
+        max_speed=max_speed,
+        spurious_worms=spurious_worms,
+        original_particles=original_particles,
+        list_number=list_number,
+        frames=frames,
+        round_ratio=round_ratio,
+        eccentricity=eccentricity))
+    return results
 
-    return region, region_particles, bends, particles, velocites, areas, \
-        move_per_bends, bpm, bendsinmovie, appears_in, max_speed, spurious_worms, original_particles, list_number, frames, round_ratio, eccentricity
 
-
-def write_stats(f, stats, dead_stats=True, prepend=''):
+def write_stats(settings, results, f, stats, dead_stats=True, prepend=''):
     s = stats
 
-    if dead_stats == True:
+    if dead_stats:
         f.write('\n CUT-OFF tool/filters')
         f.write('\n-------------------------------\n')
         f.write('Total particles: %i\n' % s['original_particles'])
@@ -745,19 +746,19 @@ def write_stats(f, stats, dead_stats=True, prepend=''):
                 % s['max_number_worms_present'])
         f.write('\n')
 
-        if cutoff_filter == True:
+        if settings["cutoff_filter"]:
             f.write('Frame number:       ')
 
-            for item in frames:
+            for item in results["frames"]:
                 f.write('%i,    ' % item)
 
             f.write('\n# of particles:   ')
 
-            for item in list_number:
+            for item in results["list_number"]:
                 f.write('%i,    ' % item)
 
             f.write('\nCut-off tool: Yes\n')
-            if use_average == True:
+            if settings["use_average"]:
                 f.write('Method: averaging\n')
             else:
                 f.write('Method: maximum\n')
@@ -765,10 +766,11 @@ def write_stats(f, stats, dead_stats=True, prepend=''):
         else:
             f.write('Cut-off tool: No\n')
 
-        if extra_filter == True:
+        if settings["extra_filter"]:
             f.write('Extra filter: Yes\n')
-            f.write('Settings: remove when bpm > %.5f and velocity < %.5f\n' % (
-                Bends_max, Speed_max))
+            f.write(
+                'Settings: remove when bpm > %.5f and velocity < %.5f\n' % (
+                    settings["Bends_max"], settings["Speed_max"]))
             f.write('Removed particles: %i' % s['spurious_worms'])
         else:
             f.write('Extra filter: No\n')
@@ -845,21 +847,26 @@ def write_stats(f, stats, dead_stats=True, prepend=''):
     f.write(prepend + 'Eccentricity SEM: %.6f\n' % s['eccentricity_mean_std'])
 
 
-def write_raw_data(f, bpm, bendsinmovie, velocites,
-                   areas, move_per_bends, appears_in, region, max_speed, round_ratio, eccentricity):
-    living = idx = np.logical_not((np.logical_and(bpm <= maximum_bpm,
-                                                  velocites <= maximum_velocity)))
-    x = (limit_images_to / fps)
+def write_raw_data(f, results, settings):
+    bpm = results["bpm"]
+    velocites = results["velocities"]
+    living = np.logical_not((np.logical_and(
+        bpm <= settings["maximum_bpm"],
+        velocites <= settings["maximum_velocity"])))
+    x = (settings["limit_images_to"] / settings["fps"])
 
     f.write('Raw data:\n')
-    f.write('Particle;BPM;Bends per %.2f s;Speed;Max speed;Dist per bend;Area;Appears in frames;Living;Region;Round ratio;Eccentricity \n' % x)
+    f.write('Particle;BPM;Bends per %.2f s;Speed;Max speed;Dist per bend;'
+            'Area;Appears in frames;Living;Region;Round ratio;'
+            'Eccentricity \n' % x)
     f.write('\n'
             .join(['%i;%.6f;%.6f;%.6f;%.6f;%s;%.6f;%i;%i;%s;%.6f;%.6f'
                    % (i, bpm[i], bendsinmovie[i], velocites[i], max_speed[i],
                       ('nan' if np.isnan(move_per_bends[i]) else
                        '%.6f' % move_per_bends[i]),
                       areas[i], appears_in[i], living[i],
-                      region[i], round_ratio[i], eccentricity[i]) for i in range(len(bpm))]))
+                      region[i], round_ratio[i], eccentricity[i])
+                   for i in range(len(bpm))]))
     f.write('\n\n')
 
 
@@ -870,20 +877,22 @@ def mean_std(x, appears_in):
     return mean, std
 
 
-def statistics(bends, particles, velocites, areas,
-               move_per_bends, bpm, bendsinmovie, appears_in, max_speed, track, original_particles, spurious_worms, frames, list_number, round_ratio, eccentricity):
+def statistics(results, settings):
     P = track['particle']
     T = track['frame']
 
-    if cutoff_filter == True:
+    if settings["cutoff_filter"]:
         max_number_worms_present = len(particles)
     else:
-        max_number_worms_present = max([len([1 for p in
-                                             set(P[T == t]) if p in particles]) for t in set(T)])
+        max_number_worms_present = max(
+            [len([1 for p in set(P[T == t]) if p in particles])
+             for t in set(T)])
     count = len(particles)
-
-    n_dead = np.sum(np.logical_and(bpm <= maximum_bpm,
-                                   velocites <= maximum_velocity))
+    bpm = results["bpm"]
+    velocites = results["velocities"]
+    n_dead = np.sum(np.logical_and(
+        bpm <= settings["maximum_bpm"],
+        velocites <= settings["maximum_velocity"]))
     n_live = len(particles) - n_dead
 
     removed_particles_cutoff = original_particles - len(particles)
@@ -928,7 +937,7 @@ def statistics(bends, particles, velocites, areas,
         move_per_bend_std = np.nan
         move_per_bend_mean_std = np.nan
 
-    stats = {    'max_number_worms_present': max_number_worms_present,
+    stats = { 'max_number_worms_present': max_number_worms_present,
               'n_dead': n_dead,
               'n_live': n_live,
               'bpm_mean': bpm_mean,
@@ -969,89 +978,93 @@ def statistics(bends, particles, velocites, areas,
     return stats
 
 
-def write_results_file(region, region_particles, bends, particles, velocites,
-                       areas, move_per_bends, bpm, bendsinmovie, appears_in, max_speed, track, original_particles, spurious_worms, frames, list_number, round_ratio, eccentricity):
-    ''' Input:
-                    region_particles: list of particles contained in a region
-                    track: the full track, used to calculate
-                                    maximum number of worms present
-                                    at any given time, which is ised in statistics
-                                     to avoid underestimation of errors.
+def write_results_file(results, settings):
+    '''
+    Input:
+        region_particles: list of particles contained in a region
+        track: the full track, used to calculate
+                        maximum number of worms present
+                        at any given time, which is ised in statistics
+                         to avoid underestimation of errors.
 
-                    The remaining input parameters all have the same shape
-                    corresponding to different particles.
+        The remaining input parameters all have the same shape
+        corresponding to different particles.
     '''
 
-    f = open('%s/results.txt' % save_as, 'w')  # CHANGE OUTPUT IF WANTED
-    f.write('---------------------------------\n')
-    f.write('    Results for %s \n' % videoname)
-    f.write('---------------------------------\n\n')
+    with open(os.path.join(settings["save_as"], 'results.txt'), 'w') as f:
+        f.write('---------------------------------\n')
+        f.write('    Results for %s \n' % settings["video_filename"])
+        f.write('---------------------------------\n\n')
 
-    # Stats for all worms
-    stats = statistics(bends, particles, velocites, areas,
-                       move_per_bends, bpm, bendsinmovie, appears_in, max_speed, track, original_particles, spurious_worms, frames, list_number, round_ratio, eccentricity)
-    write_stats(f, stats, dead_stats=True)
+        # Stats for all worms
+        stats = statistics(results)
+        write_stats(settings, results, f, stats, dead_stats=True)
 
-    # Stats for living worms
-    idx = np.logical_not((np.logical_and(bpm <= maximum_bpm,
-                                         velocites <= maximum_velocity)))
-    stats = statistics(bends[idx], particles[idx], velocites[idx],
-                       areas[idx], move_per_bends[idx],
-                       bpm[idx], bendsinmovie[idx], appears_in[idx], max_speed[idx], track, original_particles, spurious_worms, frames, list_number, round_ratio[idx], eccentricity[idx])
-    write_stats(f, stats, dead_stats=False, prepend='Living ')
+        # Stats for living worms
+        idx = np.logical_not((np.logical_and(
+            bpm <= settings["maximum_bpm"],
+            velocites <= settings["maximum_velocity"])))
+        stats = statistics(bends[idx], particles[idx], velocites[idx],
+                           areas[idx], move_per_bends[idx],
+                           bpm[idx], bendsinmovie[idx], appears_in[idx], max_speed[idx], track, original_particles, spurious_worms, frames, list_number, round_ratio[idx], eccentricity[idx])
+        write_stats(settings, results, f, stats, dead_stats=False, prepend='Living ')
 
-    # Raw stats
-    f.write('---------------------------------\n\n')
-    write_raw_data(f, bpm, bendsinmovie, velocites,
-                   areas, move_per_bends, appears_in, region, max_speed, round_ratio, eccentricity)
+        # Raw stats
+        f.write('---------------------------------\n\n')
+        write_raw_data(f, bpm, bendsinmovie, velocites,
+                       areas, move_per_bends, appears_in, region, max_speed, round_ratio, eccentricity)
 
-    # Per region stats
-    if len(regions) > 1:
-        for reg in regions:
-            f.write('---------------------------------\n')
-            f.write('Stats for region: %s\n' % reg)
-            f.write('---------------------------------\n\n')
+        regions = settings["regions"]
+        # Per region stats
+        if len(regions) > 1:
+            for reg in regions:
+                f.write('---------------------------------\n')
+                f.write('Stats for region: %s\n' % reg)
+                f.write('---------------------------------\n\n')
 
-            # Worms of this region
-            try:
-                pars = list(map(int, region_particles[reg]))
-            except TypeError:
-                pars = [int(region_particles[reg])]
-            if len(pars) == 0:
-                f.write('Nothing found in region.\n\n')
-                continue
-            indeces = [i for i, p in enumerate(particles) if p in pars]
-            idx = np.ones_like(areas) == 0
-            idx[indeces] = 1
+                # Worms of this region
+                try:
+                    pars = list(map(int, region_particles[reg]))
+                except TypeError:
+                    pars = [int(region_particles[reg])]
+                if len(pars) == 0:
+                    f.write('Nothing found in region.\n\n')
+                    continue
+                indeces = [i for i, p in enumerate(particles) if p in pars]
+                idx = np.ones_like(areas) == 0
+                idx[indeces] = 1
 
-            # All worms
-            stats = statistics(bends[idx], particles[idx], velocites[idx],
-                               areas[idx],
-                               move_per_bends[idx], bpm[idx], bendsinmovie[idx],
-                               appears_in[idx], max_speed[idx], track, original_particles, spurious_worms, frames, list_number, round_ratio[idx], eccentricity[idx])
-            write_stats(f, stats, dead_stats=True)
+                # All worms
+                stats = statistics(bends[idx], particles[idx], velocites[idx],
+                                   areas[idx],
+                                   move_per_bends[idx], bpm[idx], bendsinmovie[idx],
+                                   appears_in[idx], max_speed[idx], track, original_particles, spurious_worms, frames, list_number, round_ratio[idx], eccentricity[idx])
+                write_stats(settings, results, f, stats, dead_stats=True)
 
-            # Stats for living worms
-            # idx2 = np.logical_not((np.logical_and(bpm<=maximum_bpm,
-            # velocites<=maximum_velocity)))
-            #idx = np.logical_and(idx, idx2)
-            # stats = statistics(bends[idx], particles[idx], velocites[idx],
-            #areas[idx], bend_amplitudes[idx],
-            #move_per_bends[idx], bpm[idx],
-            # appears_in[idx], max_speed[idx], extrema_amplitudes[idx], track, original_particles, spurious_worms, frames, list_number)
-            #write_stats(f, stats, dead_stats=False, prepend='Living ')
+                # Stats for living worms
+                # idx2 = np.logical_not((np.logical_and(bpm<=maximum_bpm,
+                # velocites<=maximum_velocity)))
+                #idx = np.logical_and(idx, idx2)
+                # stats = statistics(bends[idx], particles[idx], velocites[idx],
+                #areas[idx], bend_amplitudes[idx],
+                #move_per_bends[idx], bpm[idx],
+                # appears_in[idx], max_speed[idx], extrema_amplitudes[idx], track, original_particles, spurious_worms, frames, list_number)
+                #write_stats(write_stats, results, f, stats, dead_stats=False, prepend='Living ')
 
-            f.write('\n\n')
-    f.write('\n')
-    f.close()
+                f.write('\n\n')
+        f.write('\n')
 
     print('results.txt file produced.')
 
-
-def print_frame(t, particles, P, T, bends, track):
-    font = {'size': font_size}
+# =============================================================================
+# --- Matplotlib code---
+# =============================================================================
+def print_frame(settings, t, particles, P, T, bends, track):
+    font = {'size': settings["font_size"]}
     print('Printing frame', t + 1)
-    frame = (255 - io.imread('%simgs/%05d.jpg' % (save_as, int(t))))
+    frame = (255 - io.imread(
+        os.path.join(settings["save_as"],
+        'imgs','%05d.jpg' % (int(t)))))
     small_imshow(frame, cmap=cm.binary, vmax=300)
     for i, p in enumerate(particles):
         pp = P == p
@@ -1064,16 +1077,20 @@ def print_frame(t, particles, P, T, bends, track):
                      (i, b), font, color=[1, 0.3, 0.2])
 
     m, n = frame.shape
-    plt.plot([n - (5 + scale_bar_size / float(px_to_mm)), n - 5], [m - 5, m - 5],
-             linewidth=scale_bar_thickness, c=[0.5, 0.5, 0.5])
+    plt.plot(
+        [n - (5 + settings["scale_bar_size"] / float(settings["px_to_mm"])),
+         n - 5],
+        [m - 5, m - 5],
+        linewidth=settings["scale_bar_thickness"], c=[0.5, 0.5, 0.5])
     plt.axis('off')
     plt.axis('tight')
-    plt.savefig('%simgs/%05d.jpg' % (save_as, t))
+    plt.savefig(os.path.join(settings["save_as"], 'imgs','%05d.jpg' % (t)))
 
 
-def print_images(particles, bends, track):
+def print_images(settings, particles, bends, track):
     P = track['particle']
     T = track['frame']
+    output_overlayed_images = settings["output_overlayed_images"]
     if output_overlayed_images != 0:
         up_to = (len(set(T)) if output_overlayed_images is None
                  else output_overlayed_images)
@@ -1081,25 +1098,47 @@ def print_images(particles, bends, track):
             print_frame(t, particles, P, T, bends, track)
 
 
-t0 = time.time()
-if not os.path.exists(save_as + 'imgs/'):
-    os.mkdir(save_as + 'imgs/')
+def small_imshow(img, *args, **kwargs):
+    # For large images/frames matplotlib's imshow gives memoryerror
+    # This is solved by resizing before plotting
+    s = img.shape
+    b = img
+    if (s[0] + s[1]) / 2. > 1500:
+        factor = 1500 / ((s[0] + s[1]) / 2.)
+        b = resize(img, (int(s[0] * factor), int(s[1] * factor)),
+                   preserve_range=True)
+    plt.clf()
+    plt.imshow(b, *args, extent=[0, s[1], s[0], 0], **kwargs)
 
-# Analysis
-locations = track_all_locations()
-track = form_trajectories(locations)
 
-region, region_particles, bends, particles, velocites, areas, \
-    move_per_bends, bpm, bendsinmovie, appears_in, max_speed, spurious_worms, original_particles, list_number, frames, round_ratio, eccentricity = extract_data(
-        track)
-check_for_worms(particles)
+def output_processing_frames(save_folder, frameorig, Z, frame, thresholded,
+                             frame_after_open, frame_after_close, labeled,
+                             labeled_removed, skel_labeled=None):
+    small_imshow(frameorig, cmap=cm.gray)
+    plt.savefig(os.path.join(save_folder, '0frameorig.jpg'))
 
-# Output
-write_results_file(region, region_particles, bends, particles,
-                   velocites, areas, move_per_bends, bpm, bendsinmovie,
-                   appears_in, max_speed, track, original_particles, spurious_worms, list_number, frames, round_ratio, eccentricity)
-print_images(particles, bends, track)
+    small_imshow(Z, cmap=cm.gray)
+    plt.savefig(os.path.join(save_folder, '0z.jpg'))
 
-print('Done (in %.1f minutes).' % ((time.time() - t0) / 60.))
-video.release()
-cv2.destroyAllWindows()
+    small_imshow(frame, cmap=cm.gray)
+    plt.savefig(os.path.join(save_folder, '1framesubtract.jpg'))
+
+    small_imshow(thresholded, cmap=cm.binary)
+    plt.savefig(os.path.join(save_folder, '2thresholded.jpg'))
+
+    small_imshow(frame_after_open, cmap=cm.binary)
+    plt.savefig(os.path.join(save_folder, '3opened.jpg'))
+
+    small_imshow(frame_after_close, cmap=cm.binary)
+    plt.savefig(os.path.join(save_folder, '4closed.jpg'))
+
+    small_imshow(labeled, cmap=cm.binary)
+    plt.savefig(os.path.join(save_folder, '5labelled.jpg'))
+
+    small_imshow(labeled_removed, cmap=cm.binary)
+    plt.savefig(os.path.join(save_folder, '6removed.jpg'))
+
+    if skel_labeled is not None:
+        small_imshow(skel_labeled, cmap=cm.binary)
+        plt.savefig(os.path.join(save_folder, '7skeletonized.jpg'))
+    plt.clf()
